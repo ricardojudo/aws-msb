@@ -1,0 +1,204 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Configura los controles detectivos y resguardo de bitacoras en la cuenta destino
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Artefactos de seguridad 
+        Parameters:      
+        - AccountPrefix
+      
+      - Label:
+          default: Deteccion de incidencias
+        Parameters:
+        - EnableGuardDuty
+        - EnableMacie
+        - EnableSecurityHub
+      
+      - Label:
+          default: Bitacoras y monitoreo
+        Parameters:
+        - ConfigBucketName
+        - CloudTrailBucketName
+        - CloudTrailKey
+        - CloudWatchLogsKey
+
+Parameters:
+  EnableGuardDuty:
+    Type: String
+    Description: Habilita deteccion de amenazas mediante Amazon GuardDuty
+    AllowedValues: ['true','false']
+    Default: 'true'
+
+  EnableMacie:
+    Type: String
+    Description: Habilita deteccion de datos sensibles en buckets de S3 mediante Amazon Macie
+    AllowedValues: ['true','false']
+    Default: 'true'
+
+  EnableSecurityHub:
+    Type: String
+    Description: Habilita visualizacion centralizada de hallazgos de seguridad mediante AWS Security Hub
+    AllowedValues: ['true','false']
+    Default: 'true'
+
+  AccountPrefix:
+    Type: AWS::SSM::Parameter::Value<String>
+    Description: Parametro con la abreviatura del nombre de la cuenta
+    Default: /cuenta/prefijo
+  
+  ConfigBucketName:
+    Type: AWS::SSM::Parameter::Value<String>
+    Description: Parametro con el nombre del bucket de AWS Config
+    Default: /seguridad/buckets/bucket-config
+
+  CloudTrailBucketName:
+    Type: AWS::SSM::Parameter::Value<String>
+    Description: Parametro con el nombre del bucket de AWS CloudTrail
+    Default: /seguridad/buckets/bucket-cloudtrail
+
+  CloudTrailKey:
+    Type: AWS::SSM::Parameter::Value<String>
+    Description: Parametro con arn de la llave para cifrar CloudTrail
+    Default: '/seguridad/llaves/LlaveCloudTrail'
+
+  CloudWatchLogsKey:
+    Type: AWS::SSM::Parameter::Value<String>
+    Description: Parametro con arn de la llave para cifrar CloudWatch Logs
+    Default: '/seguridad/llaves/LlaveCloudWatch'
+
+Conditions:
+  EnableSecurityHubCondition: !Equals [!Ref EnableSecurityHub, 'true']
+  EnableGuardDutyCondition: !Equals [!Ref EnableGuardDuty, 'true']
+  EnableMacieCondition: !Equals [!Ref EnableMacie, 'true']
+
+Resources:
+####
+# AWS Config - Registro de recursos y reglas de evaluación de conformidad
+####
+  
+  ConfigRecorder:
+    Type: AWS::Config::ConfigurationRecorder
+    Properties: 
+      Name: !Sub ${AccountPrefix}-default-crecord
+      RoleARN: !GetAtt ConfigRole.Arn
+  
+  ConfigRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${AccountPrefix}-config-role 
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement: 
+          - Effect: Allow
+            Principal: 
+              #AWS: !Sub arn:aws:iam::${AdminAccountId}:root
+              Service: config.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSConfigRole
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28
+            reason: "Se define un nombre para el rol"
+  
+
+
+  DeliveryChannel:
+    Type: 'AWS::Config::DeliveryChannel'
+    Properties:
+      S3BucketName: !Ref ConfigBucketName
+###
+# AWS Identity and Access Management - Analizador de acceso
+###
+  AnalizadorAccesoIAM:
+    Type: AWS::AccessAnalyzer::Analyzer
+    Properties:
+      AnalyzerName: !Sub ${AccountPrefix}-analizador-IAM
+      Type: ACCOUNT
+
+###
+# Amazon GuardDuty - Deteccion Inteligente de amenazas
+###
+  GuardDutyDetector:
+    Condition: EnableGuardDutyCondition
+    Type: AWS::GuardDuty::Detector
+    Properties:
+        Enable: True
+        FindingPublishingFrequency: FIFTEEN_MINUTES
+
+###
+# Amazon Macie - Proteccion de datos. Monitoreo y alertamiento
+###        
+  MacieSession:
+    Condition: EnableMacieCondition
+    Type: AWS::Macie::Session
+    Properties:
+      FindingPublishingFrequency: ONE_HOUR
+      Status: ENABLED
+
+###
+# AWS Security Hub - Evaluacion de controles y postura de seguridad
+###   
+  SecurityHub:
+    Condition: EnableSecurityHubCondition
+    Type: AWS::SecurityHub::Hub
+  
+###
+# AWS CloudTrail 
+###
+  AccountTrail:
+    Type: AWS::CloudTrail::Trail
+    Properties:
+      TrailName: !Sub ${AccountPrefix}-cloudtrail
+      S3BucketName: !Ref CloudTrailBucketName
+      IsLogging: true
+      IsMultiRegionTrail: true
+      EnableLogFileValidation: true
+      IncludeGlobalServiceEvents: true  
+      KMSKeyId: !Ref CloudTrailKey
+      CloudWatchLogsLogGroupArn: !GetAtt TrailLogGroup.Arn
+      CloudWatchLogsRoleArn: !GetAtt TrailLogGroupRole.Arn    
+###
+# CloudWatch Log Group 
+###
+  TrailLogGroup:
+    Type: 'AWS::Logs::LogGroup'
+    Properties:
+      LogGroupName: !Sub ${AccountPrefix}-cloudtrail-logs
+      KmsKeyId: !Ref CloudWatchLogsKey
+      RetentionInDays: 90
+###
+# Rol IAM para CloudWatch Log group 
+###
+  TrailLogGroupRole:
+     Type: 'AWS::IAM::Role'
+     Properties:
+       RoleName: !Sub ${AccountPrefix}-cloudwatch-role
+       AssumeRolePolicyDocument:
+         Version: '2012-10-17'
+         Statement:
+         - Sid: CloudTrailAssumeRole
+           Effect: Allow
+           Principal:
+             Service: 'cloudtrail.amazonaws.com'
+           Action: 'sts:AssumeRole'
+       Policies:
+       - PolicyName: 'cloudtrail-policy'
+         PolicyDocument:
+           Version: '2012-10-17'
+           Statement:
+           - Sid: AWSCloudTrailCreateLogStream
+             Effect: Allow
+             Action: 'logs:CreateLogStream'
+             Resource: !GetAtt 'TrailLogGroup.Arn'
+           - Sid: AWSCloudTrailPutLogEvents
+             Effect: Allow
+             Action: 'logs:PutLogEvents'
+             Resource: !GetAtt 'TrailLogGroup.Arn'
+     Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28
+            reason: "Se define un nombre para el rol"
