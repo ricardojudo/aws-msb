@@ -1,7 +1,8 @@
 # aws-msb
 Minimum security baseline
-This is a set of cloudformation templates that deplpy a msb (minimum security baseline) in a new aws account that has no services enabled.
-The cloudformation templates are part of a security program and should not be considered the only thing to do to improve your security posture in a new aws account.
+This is a set of cloudformation templates that enables a minimum security baseline in a new AWS account that has no services enabled.
+
+The solution is considered to be part of an integral security program. 
 
 Instructions:
 - Create S3 bucket uin your AWS account
